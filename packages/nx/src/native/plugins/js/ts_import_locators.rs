@@ -48,6 +48,10 @@ fn is_identifier(token: &Token) -> bool {
     matches!(token, Token::Word(Ident(_)))
 }
 
+fn is_dot(token: &Option<TokenAndSpan>) -> bool {
+    matches!(token.as_ref().map(|token| &token.token), Some(Token::Dot))
+}
+
 struct State<'a> {
     lexer: Lexer<'a>,
     pub current_token: Option<TokenAndSpan>,
@@ -644,6 +648,9 @@ fn process_file(
     let mut dynamic_import_expressions: Vec<(String, BytePos)> = vec![];
 
     loop {
+        // Read this before `next()`. Member calls (`obj.import()`, `obj?.require()`)
+        // are not module imports. This lexer emits `?.` as `?` followed by `.`.
+        let preceded_by_dot = is_dot(&state.current_token);
         let current_token = state.next();
 
         // This is the end of the file
@@ -662,7 +669,7 @@ fn process_file(
             };
             let import = match word {
                 // This is an import keyword
-                Keyword(keyword) if *keyword == Import => {
+                Keyword(keyword) if *keyword == Import && !preceded_by_dot => {
                     pos = Some(current.span.lo);
                     find_specifier_in_import(&mut state)
                 }
@@ -671,7 +678,7 @@ fn process_file(
 
                     find_specifier_in_export(&mut state)
                 }
-                Ident(ident) if ident.as_ref() == "require" => {
+                Ident(ident) if ident.as_ref() == "require" && !preceded_by_dot => {
                     pos = Some(current.span.lo);
                     find_specifier_in_require(&mut state)
                 }
@@ -872,6 +879,45 @@ import 'a4'; import 'a5';
             vec![String::from("non-narrow-char-dependency")]
         );
         assert!(result.dynamic_import_expressions.is_empty());
+    }
+
+    #[test]
+    fn should_ignore_member_import_and_require_calls() {
+        let temp_dir = TempDir::new().unwrap();
+        temp_dir
+            .child("test.ts")
+            .write_str(
+                r#"
+            const registry = {
+                import(name: string) { return name; },
+                require(name: string) { return name; },
+            };
+
+            registry.import("lodash");
+            registry?.import("left-pad");
+            registry.require("chalk");
+            registry?.require("debug");
+
+            const dynamic = import("real-dynamic");
+            const staticReq = require("real-require");
+            import "real-static";
+            "#,
+            )
+            .unwrap();
+
+        let test_file_path = temp_dir.display().to_string() + "/test.ts";
+        let results =
+            find_imports(HashMap::from([(String::from("a"), vec![test_file_path])])).unwrap();
+
+        let result = results.get(0).unwrap();
+        assert_eq!(
+            result.dynamic_import_expressions,
+            vec![String::from("real-dynamic")]
+        );
+        assert_eq!(
+            result.static_import_expressions,
+            vec![String::from("real-require"), String::from("real-static")]
+        );
     }
 
     #[test]
