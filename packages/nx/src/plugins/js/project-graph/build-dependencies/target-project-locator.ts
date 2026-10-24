@@ -55,6 +55,55 @@ export function isBuiltinModuleImport(importExpr: string): boolean {
   return isBuiltin(packageName) || experimentalNodeModules.has(packageName);
 }
 
+function differsOnlyByCase(left: string, right: string): boolean {
+  return left !== right && left.toLowerCase() === right.toLowerCase();
+}
+
+/**
+ * TypeScript's `@types` lookup for a bare or scoped specifier.
+ * `@foo/bar` maps to `@types/foo__bar`.
+ */
+function typesPackageNameForImport(importPackage: string): string | null {
+  if (importPackage.startsWith('@types/')) {
+    return null;
+  }
+  if (importPackage.startsWith('@')) {
+    const slash = importPackage.indexOf('/');
+    if (slash === -1) {
+      return null;
+    }
+    const scope = importPackage.slice(1, slash);
+    const name = importPackage.slice(slash + 1);
+    if (!scope || !name) {
+      return null;
+    }
+    return `@types/${scope}__${name}`;
+  }
+  return `@types/${importPackage}`;
+}
+
+/**
+ * Case-insensitive filesystems resolve `Node` to `@types/node` and `process`
+ * to `node_modules/Process`. Those differ from the import only by case, so
+ * Linux would not resolve them. Other name differences (package aliases)
+ * stay eligible.
+ */
+function resolvedPackageMatchesImport(
+  importExpr: string,
+  packagePath: string
+): boolean {
+  const importPackage = getPackageNameFromImportPath(importExpr);
+  const resolvedPackage = getPackageNameFromImportPath(packagePath);
+  if (differsOnlyByCase(resolvedPackage, importPackage)) {
+    return false;
+  }
+  const typesPackage = typesPackageNameForImport(importPackage);
+  if (typesPackage && differsOnlyByCase(resolvedPackage, typesPackage)) {
+    return false;
+  }
+  return true;
+}
+
 // TypeScript matches the `${configDir}` template case-insensitively and only as a
 // prefix (commandLineParser.ts `startsWithConfigDirTemplate`).
 const configDirTemplate = '${configDir}';
@@ -484,6 +533,10 @@ export class TargetProjectLocator {
     const packagePath = resolvedModule.substring(
       nodeModulesIndex + 'node_modules/'.length
     );
+    // Case-only directory mismatch: Linux module resolution would miss this.
+    if (!resolvedPackageMatchesImport(normalizedImportExpr, packagePath)) {
+      return;
+    }
     const externalProject = this.findNpmProjectFromImport(
       packagePath,
       filePath

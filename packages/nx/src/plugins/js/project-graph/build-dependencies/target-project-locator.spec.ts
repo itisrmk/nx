@@ -702,6 +702,105 @@ describe('TargetProjectLocator', () => {
 
       resolveModuleByImportSpy.mockRestore();
     });
+
+    it('should ignore node_modules paths whose package directory differs only by case', async () => {
+      vol.mkdirSync('/root/node_modules/Process', { recursive: true });
+      vol.writeFileSync(
+        '/root/node_modules/Process/package.json',
+        JSON.stringify({ name: 'Process', version: '1.0.0' })
+      );
+      vol.mkdirSync('/root/node_modules/@types/node', { recursive: true });
+      vol.writeFileSync(
+        '/root/node_modules/@types/node/package.json',
+        JSON.stringify({ name: '@types/node', version: '20.0.0' })
+      );
+      vol.mkdirSync('/root/node_modules/@types/foo__bar', { recursive: true });
+      vol.writeFileSync(
+        '/root/node_modules/@types/foo__bar/package.json',
+        JSON.stringify({ name: '@types/foo__bar', version: '1.0.0' })
+      );
+
+      const typescriptModule =
+        await import('nx/src/plugins/js/utils/typescript');
+      const resolveModuleByImportSpy = vi.spyOn(
+        typescriptModule,
+        'resolveModuleByImport'
+      );
+
+      const locator = new TargetProjectLocator(
+        projects,
+        {
+          ...npmProjects,
+          'npm:Process': {
+            name: 'npm:Process',
+            type: 'npm',
+            data: {
+              version: '1.0.0',
+              packageName: 'Process',
+            },
+          },
+          'npm:@types/node': {
+            name: 'npm:@types/node',
+            type: 'npm',
+            data: {
+              version: '20.0.0',
+              packageName: '@types/node',
+            },
+          },
+          'npm:@types/foo__bar': {
+            name: 'npm:@types/foo__bar',
+            type: 'npm',
+            data: {
+              version: '1.0.0',
+              packageName: '@types/foo__bar',
+            },
+          },
+        },
+        new Map(),
+        new Map()
+      );
+
+      const resolve = (importExpr: string, resolvedModule: string) => {
+        resolveModuleByImportSpy.mockReturnValue(resolvedModule);
+        return locator['resolveImportWithTypescript'](
+          importExpr,
+          'libs/proj/index.ts'
+        );
+      };
+
+      expect(resolve('lodash', 'node_modules/lodash/index.js')).toEqual(
+        'npm:lodash'
+      );
+      expect(resolve('my-lodash', 'node_modules/lodash/index.js')).toEqual(
+        'npm:lodash'
+      );
+      expect(
+        resolve('process', 'node_modules/Process/index.js')
+      ).toBeUndefined();
+      expect(resolve('Process', 'node_modules/Process/index.js')).toEqual(
+        'npm:Process'
+      );
+      expect(
+        resolve('Node', 'node_modules/@types/node/index.d.ts')
+      ).toBeUndefined();
+      expect(
+        resolve('@types/node', 'node_modules/@types/node/index.d.ts')
+      ).toEqual('npm:@types/node');
+      expect(
+        resolve('@Foo/Bar', 'node_modules/@types/foo__bar/index.d.ts')
+      ).toBeUndefined();
+      expect(
+        resolve('@foo/bar', 'node_modules/@types/foo__bar/index.d.ts')
+      ).toEqual('npm:@types/foo__bar');
+      resolveModuleByImportSpy.mockReturnValue(
+        'node_modules/@types/node/index.d.ts'
+      );
+      expect(
+        locator.findProjectFromImport('Node', 'libs/proj/index.ts')
+      ).toEqual(null);
+
+      resolveModuleByImportSpy.mockRestore();
+    });
   });
 
   describe('findTargetProjectWithImport (without tsconfig.json)', () => {
